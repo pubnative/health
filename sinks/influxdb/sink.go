@@ -21,7 +21,6 @@ type InfluxDBSink struct {
 	precision string
 	notifier  Notifier
 	client    *client.Client
-	workers   int
 	In        chan *client.Point
 }
 
