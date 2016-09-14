@@ -140,20 +140,15 @@ type worker struct {
 	sink    *InfluxDBSink
 	swTick  <-chan time.Time
 	batch   client.BatchPoints
-	counter int
 }
 
 func (w *worker) process() {
 	for {
-		if w.counter >= bufferSize {
-			w.send()
-		}
 		select {
 		case <-w.swTick:
 			w.send()
 		case point := <-w.sink.In:
 			w.batch.AddPoint(point)
-			w.counter += 1
 		}
 	}
 }
@@ -161,7 +156,6 @@ func (w *worker) process() {
 func (w *worker) send() {
 	toSend := w.batch
 	w.batch = w.sink.createBatch()
-	w.counter = 0
 	go w.sink.send(&toSend)
 }
 
