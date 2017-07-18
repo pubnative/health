@@ -170,7 +170,7 @@ func (w *worker) process() {
 }
 
 func increment(batch pointsBatch, point *point) {
-	key := tagsToKey(point.tags)
+	key := tagsToKey(point.name, point.tags)
 	if existingPoint, ok := batch[key]; ok {
 		for fk, v := range point.fields {
 			if existingValue, ok := existingPoint.fields[fk]; ok {
@@ -184,15 +184,18 @@ func increment(batch pointsBatch, point *point) {
 	}
 }
 
-func tagsToKey(tags map[string]string) string {
+func tagsToKey(name string, tags map[string]string) string {
 	ks := make([]string, len(tags))
 	for k := range tags {
 		ks = append(ks, k)
 	}
 	sort.Strings(ks)
 	var buff bytes.Buffer
+	buff.WriteString(name)
 	for _, k := range ks {
+		buff.WriteString(",")
 		buff.WriteString(k)
+		buff.WriteString("=")
 		buff.WriteString(tags[k])
 	}
 	return buff.String()

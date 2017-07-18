@@ -33,6 +33,7 @@ func TestSinkWorker(t *testing.T) {
 	sink.EmitEvent("abc", "ev1", health.Kvs{"x0?": "y.", "-z": "1xo"})
 	sink.EmitEvent("abc", "ev2", health.Kvs{"x0?": "y.", "-z": "1xo"})
 	sink.EmitEvent("abc", "ev1", health.Kvs{"x0^": "y.", "-z": "1ko"})
+	sink.EmitEvent("abcd", "ev1", health.Kvs{"x0^": "y.", "-z": "1ko"})
 	sink.EmitEventErr("abc", "ev1", errors.New("!"), health.Kvs{"x0^": "y.", "-z": "1ko"})
 	sink.EmitEventErr("abc", "ev1", errors.New("!"), health.Kvs{"x0^": "y.", "-z": "1ko"})
 
@@ -44,7 +45,7 @@ func TestSinkWorker(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	assert.Len(t, w.batch, 4)
-	assert.Len(t, w.aggBatch, 3)
+	assert.Len(t, w.aggBatch, 4)
 
 	flush <- time.Now()
 	time.Sleep(50 * time.Millisecond)
@@ -52,19 +53,19 @@ func TestSinkWorker(t *testing.T) {
 
 	str := make([]string, len(pts))
 	for i := range pts {
-		str[i] = strings.TrimRight(pts[i].String(), "0123456789") // remove timestamp
+		str[i] = strings.TrimSpace(strings.TrimRight(pts[i].String(), "0123456789")) // remove timestamp
 	}
 	sort.Strings(str)
 
 	assert.Equal(t, strings.Join(str, ""+
-		"\n"),
-		`abc,-z=1ko,x0^=y. error=2i,ev1=3i
-abc,-z=1xo,event=ev1,x0?=y. gauge=1 
-abc,-z=1xo,event=ev1,x0?=y. gauge=1 
-abc,-z=1xo,event=ev1,x0?=y. timing=12345i 
-abc,-z=1xo,event=ev1,x0?=y. timing=12345i 
-abc,-z=1xo,x0?=y. ev1=1i,ev2=1i 
-abc,-z=1xo,x0^=y. ev1=3i,ev2=1i `)
+		"\n"), `abc,-z=1ko,x0^=y. error=2i,ev1=3i
+abc,-z=1xo,event=ev1,x0?=y. gauge=1
+abc,-z=1xo,event=ev1,x0?=y. gauge=1
+abc,-z=1xo,event=ev1,x0?=y. timing=12345i
+abc,-z=1xo,event=ev1,x0?=y. timing=12345i
+abc,-z=1xo,x0?=y. ev1=1i,ev2=1i
+abc,-z=1xo,x0^=y. ev1=3i,ev2=1i
+abcd,-z=1ko,x0^=y. ev1=1i`)
 }
 
 type testClient struct {
