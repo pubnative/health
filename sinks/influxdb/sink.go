@@ -83,12 +83,17 @@ func (s *InfluxDBSink) emitPoint(
 	if s.client == nil {
 		return
 	}
-	if tags == nil {
-		tags = make(map[string]string)
+	tagsCopy := make(map[string]string, len(tags)+1)
+	for k, v := range tags {
+		tagsCopy[k] = v
 	}
-	tags["hostname"] = s.hostname
+	tagsCopy["hostname"] = s.hostname
+	fieldsCopy := make(map[string]interface{}, len(fields))
+	for k, v := range fields {
+		fieldsCopy[k] = v
+	}
 	select {
-	case s.In <- &point{name, tags, fields, time.Now()}:
+	case s.In <- &point{name, tagsCopy, fieldsCopy, time.Now()}:
 	default:
 		if s.notifier != nil {
 			s.notifier.Notify(chanFullErr)
