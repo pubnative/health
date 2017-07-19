@@ -1,7 +1,10 @@
 package influxdb
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -10,7 +13,8 @@ import (
 )
 
 const bufferSize = 10000
-const ticker = 200 * time.Millisecond
+const ticker = 1 * time.Second
+
 var chanFullErr = errors.New("InfluxDB channel full, dropping point")
 
 type InfluxDBSink struct {
@@ -19,12 +23,24 @@ type InfluxDBSink struct {
 	hostname  string
 	precision string
 	notifier  Notifier
-	client    *client.Client
-	In        chan *client.Point
+	client    client.Client
+	In        chan *point
 }
 
 type Notifier interface {
 	Notify(err error)
+}
+
+type pointsBatch map[string]*point
+type point struct {
+	name   string
+	tags   map[string]string
+	fields map[string]interface{}
+	time   time.Time
+}
+
+func (p *point) makePoint() (*client.Point, error) {
+	return client.NewPoint(p.name, p.tags, p.fields, p.time)
 }
 
 func (s InfluxDBSink) EmitEvent(job string, event string, kvs map[string]string) {
@@ -38,7 +54,7 @@ func (s InfluxDBSink) EmitTiming(job string, event string, nanoseconds int64, kv
 		kvs = make(map[string]string)
 	}
 	kvs["event"] = event
-	timing := map[string]interface{}{"timing": nanoseconds}
+	timing := map[string]interface{}{"timing": nanoseconds, event: 1}
 	s.emitPoint(job, kvs, timing)
 }
 func (s InfluxDBSink) EmitGauge(job string, event string, value float64, kvs map[string]string) {
@@ -46,15 +62,16 @@ func (s InfluxDBSink) EmitGauge(job string, event string, value float64, kvs map
 		kvs = make(map[string]string)
 	}
 	kvs["event"] = event
-	gauge := map[string]interface{}{"gauge": value}
+	gauge := map[string]interface{}{"gauge": value, event: 1}
 	s.emitPoint(job, kvs, gauge)
 }
 func (s InfluxDBSink) EmitComplete(job string, status health.CompletionStatus, nanoseconds int64, kvs map[string]string) {
 	if kvs == nil {
 		kvs = make(map[string]string)
 	}
-	kvs["status"] = status.String()
-	timing := map[string]interface{}{"timing": nanoseconds}
+	statusStr := status.String()
+	kvs["status"] = statusStr
+	timing := map[string]interface{}{"timing": nanoseconds, statusStr: 1}
 	s.emitPoint(job, kvs, timing)
 }
 
@@ -66,31 +83,47 @@ func (s *InfluxDBSink) emitPoint(
 	if s.client == nil {
 		return
 	}
-	if tags == nil {
-		tags = make(map[string]string)
+	tagsCopy := make(map[string]string, len(tags)+1)
+	for k, v := range tags {
+		tagsCopy[k] = v
 	}
-	tags["hostname"] = s.hostname
-	if p, err := client.NewPoint(name, tags, fields, time.Now()); err == nil {
-		select {
-		case s.In <- p:
-		default:
-			if s.notifier != nil {
-				s.notifier.Notify(chanFullErr)
-			}
+	tagsCopy["hostname"] = s.hostname
+	fieldsCopy := make(map[string]interface{}, len(fields))
+	for k, v := range fields {
+		fieldsCopy[k] = v
+	}
+	select {
+	case s.In <- &point{name, tagsCopy, fieldsCopy, time.Now()}:
+	default:
+		if s.notifier != nil {
+			s.notifier.Notify(chanFullErr)
 		}
-	} else if s.notifier != nil {
+	}
+
+}
+
+func (s *InfluxDBSink) notifyRecover(r interface{}) {
+	if err, ok := r.(error); ok {
 		s.notifier.Notify(err)
+	} else {
+		s.notifier.Notify(errors.New(fmt.Sprintf("%+v", r)))
 	}
 }
 
-func (s *InfluxDBSink) send(batch *client.BatchPoints) {
+func (s *InfluxDBSink) sendBatch(batch *client.BatchPoints) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.notifyRecover(r)
+		}
+	}()
+
 	if s.client == nil || len((*batch).Points()) == 0 {
 		return
 	}
-	if _, _, err := (*s.client).Ping(time.Second); err != nil {
+	if _, _, err := s.client.Ping(time.Second); err != nil {
 		s.connect()
 	}
-	if err := (*s.client).Write(*batch); err != nil {
+	if err := s.client.Write(*batch); err != nil {
 		if s.notifier != nil {
 			s.notifier.Notify(err)
 		}
@@ -113,51 +146,94 @@ func (s *InfluxDBSink) connect() {
 		s.notifier.Notify(err)
 	}
 	if err == nil {
-		s.client = &conn
+		s.client = conn
 	}
-}
-
-func (s *InfluxDBSink) createBatch() client.BatchPoints {
-	b, _ := client.NewBatchPoints(client.BatchPointsConfig{
-		Database:  s.db,
-		Precision: s.precision,
-	})
-	return b
 }
 
 func (s *InfluxDBSink) spawnWorker() {
 	w := worker{
-		sink: s,
-		swTick: time.Tick(ticker),
-		batch: s.createBatch(),
+		sink:     s,
+		swTick:   time.Tick(ticker),
+		aggBatch: make(pointsBatch),
 	}
-
 	go w.process()
 }
 
 type worker struct {
-	sink    *InfluxDBSink
-	swTick  <-chan time.Time
-	batch   client.BatchPoints
+	sink     *InfluxDBSink
+	swTick   <-chan time.Time
+	aggBatch pointsBatch
 }
 
 func (w *worker) process() {
+	defer func() {
+		if r := recover(); r != nil {
+			w.sink.notifyRecover(r)
+		}
+		go w.process()
+	}()
+
 	for {
 		select {
 		case <-w.swTick:
-			w.send()
+			w.sendBatch()
 		case point := <-w.sink.In:
-			w.batch.AddPoint(point)
+			increment(w.aggBatch, point)
 		}
 	}
 }
 
-func (w *worker) send() {
-	toSend := w.batch
-	w.batch = w.sink.createBatch()
-	go w.sink.send(&toSend)
+func increment(batch pointsBatch, point *point) {
+	key := tagsToKey(point.name, point.tags)
+	if existingPoint, ok := batch[key]; ok {
+		for fk, v := range point.fields {
+			if existingValue, ok := existingPoint.fields[fk]; ok {
+				if fk != "gauge" && fk != "timing" {
+					existingPoint.fields[fk] = existingValue.(int) + v.(int)
+				}
+			} else {
+				existingPoint.fields[fk] = v
+			}
+		}
+	} else {
+		batch[key] = point
+	}
 }
 
+func tagsToKey(name string, tags map[string]string) string {
+	ks := make([]string, len(tags))
+	for k := range tags {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	var buff bytes.Buffer
+	buff.WriteString(name)
+	for _, k := range ks {
+		buff.WriteString(",")
+		buff.WriteString(k)
+		buff.WriteString("=")
+		buff.WriteString(tags[k])
+	}
+	return buff.String()
+}
+
+func (w *worker) sendBatch() {
+	toSend := w.aggBatch
+	w.aggBatch = make(pointsBatch)
+	b, _ := client.NewBatchPoints(client.BatchPointsConfig{
+		Database:  w.sink.db,
+		Precision: w.sink.precision,
+	})
+	for k := range toSend {
+		point, err := toSend[k].makePoint()
+		if err == nil {
+			b.AddPoint(point)
+		} else {
+			w.sink.notifier.Notify(err)
+		}
+	}
+	go w.sink.sendBatch(&b)
+}
 
 func SetupInfluxDBSink(db, dbHost, hostname, precision string, notifier Notifier, workers int) *InfluxDBSink {
 	if dbHost == "" {
@@ -170,7 +246,7 @@ func SetupInfluxDBSink(db, dbHost, hostname, precision string, notifier Notifier
 		db:        db, // note: if using UDP the database is configured by the UDP service
 		precision: precision,
 		notifier:  notifier,
-		In:        make(chan *client.Point, bufferSize),
+		In:        make(chan *point, bufferSize),
 	}
 
 	s.connect()
