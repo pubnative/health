@@ -38,14 +38,13 @@ func TestSinkWorker(t *testing.T) {
 	sink.EmitEventErr("abc", "ev1", errors.New("!"), health.Kvs{"x0^": "y.", "-z": "1ko"})
 
 	sink.EmitGauge("abc", "ev1", 1.0, health.Kvs{"x0?": "y.", "-z": "1xo"})
-	sink.EmitGauge("abc", "ev1", 1.0, health.Kvs{"x0?": "y.", "-z": "1xo"})
+	sink.EmitGauge("abc", "ev1", 1.1, health.Kvs{"x0?": "y.", "-z": "1xo"})
 
 	sink.EmitTiming("abc", "ev1", 12345, health.Kvs{"x0?": "y.", "-z": "1xo"})
-	sink.EmitTiming("abc", "ev1", 12345, health.Kvs{"x0?": "y.", "-z": "1xo"})
+	sink.EmitTiming("abc", "ev1", 12346, health.Kvs{"x0?": "y.", "-z": "1xo"})
 	time.Sleep(50 * time.Millisecond)
 
-	assert.Len(t, w.batch, 4)
-	assert.Len(t, w.aggBatch, 4)
+	assert.Len(t, w.aggBatch, 5)
 
 	flush <- time.Now()
 	time.Sleep(50 * time.Millisecond)
@@ -57,15 +56,13 @@ func TestSinkWorker(t *testing.T) {
 	}
 	sort.Strings(str)
 
-	assert.Equal(t, strings.Join(str, ""+
-		"\n"), `abc,-z=1ko,x0^=y. error=2i,ev1=3i
-abc,-z=1xo,event=ev1,x0?=y. gauge=1
-abc,-z=1xo,event=ev1,x0?=y. gauge=1
-abc,-z=1xo,event=ev1,x0?=y. timing=12345i
-abc,-z=1xo,event=ev1,x0?=y. timing=12345i
+	assert.Equal(t, `abc,-z=1ko,x0^=y. error=2i,ev1=3i
+abc,-z=1xo,event=ev1,x0?=y. ev1=4i,gauge=1,timing=12345i
 abc,-z=1xo,x0?=y. ev1=1i,ev2=1i
 abc,-z=1xo,x0^=y. ev1=3i,ev2=1i
-abcd,-z=1ko,x0^=y. ev1=1i`)
+abcd,-z=1ko,x0^=y. ev1=1i`,
+		strings.Join(str, "\n"),
+	)
 }
 
 type testClient struct {

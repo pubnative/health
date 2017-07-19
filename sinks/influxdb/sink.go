@@ -41,11 +41,6 @@ type point struct {
 func (p *point) makePoint() (*client.Point, error) {
 	return client.NewPoint(p.name, p.tags, p.fields, p.time)
 }
-func (p *point) canAggregate() bool {
-	_, isTiming := p.fields["timing"]
-	_, isGauge := p.fields["gauge"]
-	return !isTiming && !isGauge
-}
 
 func (s InfluxDBSink) EmitEvent(job string, event string, kvs map[string]string) {
 	s.emitPoint(job, kvs, map[string]interface{}{event: 1})
@@ -58,7 +53,7 @@ func (s InfluxDBSink) EmitTiming(job string, event string, nanoseconds int64, kv
 		kvs = make(map[string]string)
 	}
 	kvs["event"] = event
-	timing := map[string]interface{}{"timing": nanoseconds}
+	timing := map[string]interface{}{"timing": nanoseconds, event: 1}
 	s.emitPoint(job, kvs, timing)
 }
 func (s InfluxDBSink) EmitGauge(job string, event string, value float64, kvs map[string]string) {
@@ -66,15 +61,16 @@ func (s InfluxDBSink) EmitGauge(job string, event string, value float64, kvs map
 		kvs = make(map[string]string)
 	}
 	kvs["event"] = event
-	gauge := map[string]interface{}{"gauge": value}
+	gauge := map[string]interface{}{"gauge": value, event: 1}
 	s.emitPoint(job, kvs, gauge)
 }
 func (s InfluxDBSink) EmitComplete(job string, status health.CompletionStatus, nanoseconds int64, kvs map[string]string) {
 	if kvs == nil {
 		kvs = make(map[string]string)
 	}
-	kvs["status"] = status.String()
-	timing := map[string]interface{}{"timing": nanoseconds}
+	statusStr := status.String()
+	kvs["status"] = statusStr
+	timing := map[string]interface{}{"timing": nanoseconds, statusStr: 1}
 	s.emitPoint(job, kvs, timing)
 }
 
@@ -147,7 +143,6 @@ type worker struct {
 	sink     *InfluxDBSink
 	swTick   <-chan time.Time
 	aggBatch pointsBatch
-	batch    []*client.Point
 }
 
 func (w *worker) process() {
@@ -156,14 +151,6 @@ func (w *worker) process() {
 		case <-w.swTick:
 			w.sendBatch()
 		case point := <-w.sink.In:
-			if !point.canAggregate() {
-				if clientPoint, err := point.makePoint(); err != nil {
-					w.sink.notifier.Notify(err)
-				} else {
-					w.batch = append(w.batch, clientPoint)
-				}
-				continue
-			}
 			increment(w.aggBatch, point)
 		}
 	}
@@ -174,9 +161,11 @@ func increment(batch pointsBatch, point *point) {
 	if existingPoint, ok := batch[key]; ok {
 		for fk, v := range point.fields {
 			if existingValue, ok := existingPoint.fields[fk]; ok {
-				existingPoint.fields[fk] = existingValue.(int) + v.(int)
+				if fk != "gauge" && fk != "timing" {
+					existingPoint.fields[fk] = existingValue.(int) + v.(int)
+				}
 			} else {
-				existingPoint.fields[fk] = v.(int)
+				existingPoint.fields[fk] = v
 			}
 		}
 	} else {
@@ -208,7 +197,6 @@ func (w *worker) sendBatch() {
 		Database:  w.sink.db,
 		Precision: w.sink.precision,
 	})
-	b.AddPoints(w.batch)
 	for k := range toSend {
 		point, err := toSend[k].makePoint()
 		if err == nil {
