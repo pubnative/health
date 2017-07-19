@@ -3,6 +3,7 @@ package influxdb
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -96,7 +97,21 @@ func (s *InfluxDBSink) emitPoint(
 
 }
 
+func (s *InfluxDBSink) notifyRecover(r interface{}) {
+	if err, ok := r.(error); ok {
+		s.notifier.Notify(err)
+	} else {
+		s.notifier.Notify(errors.New(fmt.Sprintf("%+v", r)))
+	}
+}
+
 func (s *InfluxDBSink) sendBatch(batch *client.BatchPoints) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.notifyRecover(r)
+		}
+	}()
+
 	if s.client == nil || len((*batch).Points()) == 0 {
 		return
 	}
@@ -146,6 +161,13 @@ type worker struct {
 }
 
 func (w *worker) process() {
+	defer func() {
+		if r := recover(); r != nil {
+			w.sink.notifyRecover(r)
+		}
+		go w.process()
+	}()
+
 	for {
 		select {
 		case <-w.swTick:
